@@ -81,42 +81,88 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		return info, nil
 	}
 
-	packageName := strings.TrimSpace(stdout.String())
-	if packageName == "" {
+	output := strings.TrimSpace(stdout.String())
+	if output == "" {
 		info.IsPackaged = false
 		return info, nil
 	}
 
 	info.IsPackaged = true
 
-	// Store the full package name with version
-	info.PackageName = packageName
+	// Handle multiple packages (when file belongs to multiple versions)
+	packages := strings.Split(output, "\n")
 
-	// Try to extract just the package name and version
-	// Use rpm query to get the package name without version
-	cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{NAME}\n", packageName)
-	stdout.Reset()
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err == nil {
-		name := strings.TrimSpace(stdout.String())
-		if name != "" {
-			info.PackageName = name
+	if len(packages) > 1 {
+		// Multiple packages found - concatenate them
+		var pkgNames []string
+		var pkgVersions []string
+
+		for _, pkg := range packages {
+			pkg = strings.TrimSpace(pkg)
+			if pkg == "" {
+				continue
+			}
+
+			// Get just the package name
+			cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{NAME}", pkg)
+			var nameBuf bytes.Buffer
+			cmd.Stdout = &nameBuf
+			if err := cmd.Run(); err == nil {
+				name := strings.TrimSpace(nameBuf.String())
+				if name != "" && !contains(pkgNames, name) {
+					pkgNames = append(pkgNames, name)
+				}
+			}
+
+			// Get the version
+			cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", pkg)
+			var verBuf bytes.Buffer
+			cmd.Stdout = &verBuf
+			if err := cmd.Run(); err == nil {
+				ver := strings.TrimSpace(verBuf.String())
+				if ver != "" && !contains(pkgVersions, ver) {
+					pkgVersions = append(pkgVersions, ver)
+				}
+			}
 		}
-	}
 
-	// Get the version
-	cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", packageName)
-	stdout.Reset()
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err == nil {
-		version := strings.TrimSpace(stdout.String())
-		if version != "" {
-			info.PackageVersion = version
+		info.PackageName = strings.Join(pkgNames, "/")
+		info.PackageVersion = strings.Join(pkgVersions, ", ")
+		info.Extra["multiplePackages"] = packages
+	} else {
+		// Single package
+		packageName := packages[0]
+
+		// Get just the package name
+		cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{NAME}", packageName)
+		stdout.Reset()
+		cmd.Stdout = &stdout
+		if err := cmd.Run(); err == nil {
+			name := strings.TrimSpace(stdout.String())
+			if name != "" {
+				info.PackageName = name
+			}
+		}
+
+		// Get the version
+		cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", packageName)
+		stdout.Reset()
+		cmd.Stdout = &stdout
+		if err := cmd.Run(); err == nil {
+			version := strings.TrimSpace(stdout.String())
+			if version != "" {
+				info.PackageVersion = version
+			}
 		}
 	}
 
 	// Get vendor information - parse from rpm -qi output as queryformat might not work
-	cmd = exec.CommandContext(ctx, "rpm", "-qi", packageName)
+	// Use the first package for vendor info
+	firstPackage := packages[0]
+	if firstPackage == "" && info.PackageName != "" {
+		firstPackage = info.PackageName
+	}
+	cmd = exec.CommandContext(ctx, "rpm", "-qi", firstPackage)
 	stdout.Reset()
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err == nil {
@@ -160,7 +206,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 	// Additional signature verification if needed and not already found
 	if !opts.SkipValidation && info.SignatureValid == nil {
 		// Try to get signature info using queryformat as fallback
-		cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{DSAHEADER:pgpsig}%{RSAHEADER:pgpsig}%{SIGGPG:pgpsig}%{SIGPGP:pgpsig}\n", packageName)
+		cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{DSAHEADER:pgpsig}%{RSAHEADER:pgpsig}%{SIGGPG:pgpsig}%{SIGPGP:pgpsig}\n", firstPackage)
 		stdout.Reset()
 		cmd.Stdout = &stdout
 		if err := cmd.Run(); err == nil {
@@ -175,7 +221,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		// If we still don't have signature info, check package integrity
 		if info.SignatureValid == nil {
 			// Check if the RPM database shows the package as intact
-			cmd = exec.CommandContext(ctx, "rpm", "-V", packageName)
+			cmd = exec.CommandContext(ctx, "rpm", "-V", firstPackage)
 			if err := cmd.Run(); err == nil {
 				// If rpm -V succeeds without errors, package integrity is good
 				// This means the package was installed from a repository
@@ -400,6 +446,15 @@ func isOSVendor(vendor string) bool {
 	vendorLower := strings.ToLower(vendor)
 	for _, v := range osVendors {
 		if strings.Contains(vendorLower, strings.ToLower(v)) {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(slice []string, str string) bool {
+	for _, v := range slice {
+		if v == str {
 			return true
 		}
 	}

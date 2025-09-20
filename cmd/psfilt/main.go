@@ -380,7 +380,7 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 
 // isKernelThread checks if a process is a kernel thread on Linux.
 // On Linux, all kernel threads have ppid=2 (kthreadd).
-func isKernelThread(pid string, ppid string) bool {
+func isKernelThread(_ string, ppid string) bool {
 	// Only check on Linux
 	if runtime.GOOS != "linux" {
 		return false
@@ -600,6 +600,10 @@ func formatSigner(info *signedby.SignatureInfo) string {
 	}
 
 	if info.SignerOrg != "" {
+		// Show "Vendor: Package" format
+		if info.PackageName != "" {
+			return fmt.Sprintf("%s: %s", info.SignerOrg, info.PackageName)
+		}
 		return info.SignerOrg
 	}
 
