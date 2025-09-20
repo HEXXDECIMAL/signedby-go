@@ -5,7 +5,6 @@ package signedby
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -359,4 +358,8 @@ func isOSVendor(vendor string) bool {
 		}
 	}
 	return false
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }
