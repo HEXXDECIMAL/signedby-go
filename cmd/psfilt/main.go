@@ -10,7 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,13 +95,11 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 
 	opts.logger.Debug("starting ps output processing")
 
-	psPattern := regexp.MustCompile(`^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$`)
-
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		if !headerPrinted {
-			if strings.Contains(line, "PID") || strings.Contains(line, "USER") {
+			if strings.Contains(line, "PID") || strings.Contains(line, "USER") || strings.Contains(line, "UID") {
 				if opts.pidColumn {
 					fmt.Fprintf(output, "%s SIGNER\n", line)
 				} else {
@@ -112,13 +110,40 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 			}
 		}
 
-		matches := psPattern.FindStringSubmatch(line)
-		if len(matches) < 12 {
+		// Try to extract PID and command more flexibly
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
 			continue
 		}
 
-		pid := matches[2]
-		command := matches[11]
+		// Find the PID field (should be a number in position 1)
+		var pid, command string
+		pidFound := false
+		for i, field := range fields {
+			if !pidFound && i > 0 && i < 4 { // PID is usually in positions 1-3
+				if _, err := strconv.Atoi(field); err == nil {
+					pid = field
+					pidFound = true
+					// Command starts after some fixed fields
+					// ps aux: after field 10 (11th field)
+					// ps -afe: after field 7 (8th field)
+					cmdStartIdx := i + 6 // Default for ps -afe (UID PID PPID C STIME TTY TIME CMD)
+					if len(fields) > 10 && strings.Contains(fields[6], ":") && strings.Contains(fields[7], ":") {
+						// Likely ps aux format (has STAT and START columns)
+						cmdStartIdx = 10
+					}
+					if cmdStartIdx < len(fields) {
+						command = strings.Join(fields[cmdStartIdx:], " ")
+					}
+					break
+				}
+			}
+		}
+
+		if pid == "" || command == "" {
+			opts.logger.Debug("could not parse ps line", "line", line)
+			continue
+		}
 
 		// Get the actual executable path using ps -p <pid>
 		cmdPath, needsRoot := getExecutableForPID(pid, opts.logger)
@@ -128,10 +153,24 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 			// Mark this process as needing root but still show it
 			proc := processInfo{
 				line:      line,
-				fields:    matches[1:],
+				fields:    fields,
 				path:      "", // Empty path will be handled specially
 				pid:       pid,
 				needsRoot: true,
+			}
+			processes = append(processes, proc)
+			continue
+		}
+
+		// Check if it's a deleted executable
+		if strings.HasPrefix(cmdPath, "DELETED:") {
+			// Handle deleted executables specially
+			proc := processInfo{
+				line:      line,
+				fields:    fields,
+				path:      cmdPath, // Keep the DELETED: prefix for special handling
+				pid:       pid,
+				needsRoot: false,
 			}
 			processes = append(processes, proc)
 			continue
@@ -141,20 +180,31 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 			// Fallback to parsing command if ps -p fails
 			cmdPath = extractPath(command, opts.logger)
 			if cmdPath == "" {
-				opts.logger.Debug("skipping process - no path", "pid", pid, "command", command)
+				opts.logger.Debug("cannot determine path", "pid", pid, "command", command)
+				// Still include the process but mark it as unresolvable
+				proc := processInfo{
+					line:      line,
+					fields:    fields,
+					path:      "", // Empty path for unresolvable
+					pid:       pid,
+					needsRoot: false,
+				}
+				processes = append(processes, proc)
 				continue
 			}
 		}
 
 		proc := processInfo{
 			line:      line,
-			fields:    matches[1:],
+			fields:    fields,
 			path:      cmdPath,
 			pid:       pid,
 			needsRoot: false,
 		}
 		processes = append(processes, proc)
-		pathSet[cmdPath] = true
+		if !strings.HasPrefix(cmdPath, "DELETED:") {
+			pathSet[cmdPath] = true
+		}
 	}
 
 	opts.logger.Debug("found unique binaries", "count", len(pathSet))
@@ -172,6 +222,16 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 			if !opts.signedOnly {
 				displayProcess(output, proc, nil, opts)
 			}
+		} else if strings.HasPrefix(proc.path, "DELETED:") {
+			// Always display deleted executables with special marker
+			if !opts.signedOnly {
+				displayProcess(output, proc, nil, opts)
+			}
+		} else if proc.path == "" {
+			// Process with unresolvable path
+			if !opts.signedOnly {
+				displayProcess(output, proc, nil, opts)
+			}
 		} else {
 			info := results[proc.path]
 			if shouldDisplay(info, opts) {
@@ -182,7 +242,34 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 }
 
 func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
-	// First try ps -p <pid> -o comm= to get the executable path
+	// On Linux, first try /proc/<pid>/exe which is most reliable
+	procExePath := filepath.Join("/proc", pid, "exe")
+	if target, err := os.Readlink(procExePath); err == nil {
+		// Successfully read the symlink
+		// Check if the executable has been deleted
+		if strings.HasSuffix(target, " (deleted)") {
+			// Return a special marker for deleted executables
+			logger.Debug("executable is deleted", "pid", pid, "path", target)
+			return "DELETED:" + strings.TrimSuffix(target, " (deleted)"), false
+		}
+		logger.Debug("got executable from /proc/PID/exe", "pid", pid, "path", target)
+		return target, false
+	} else if os.IsPermission(err) {
+		// Permission denied - need root
+		logger.Debug("need root access for /proc/PID/exe", "pid", pid, "error", err)
+		// Try to get at least the command name for display
+		cmdlinePath := filepath.Join("/proc", pid, "cmdline")
+		if cmdline, err := os.ReadFile(cmdlinePath); err == nil && len(cmdline) > 0 {
+			// cmdline is null-separated, get first part
+			parts := strings.Split(string(cmdline), "\x00")
+			if len(parts) > 0 && parts[0] != "" {
+				return parts[0], true // Return command and needsRoot=true
+			}
+		}
+		return "", true
+	}
+
+	// Fallback to ps -p for non-Linux or if /proc is not available
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "ps", "-p", pid, "-o", "comm=")
 	output, err := cmd.Output()
@@ -202,8 +289,7 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 		return path, false
 	}
 
-	// For non-absolute paths, try to get the real binary using lsof
-	// Look specifically for the txt (text/executable) file descriptor
+	// For non-absolute paths, try to get the real binary using lsof as last resort
 	cmd = exec.CommandContext(ctx, "lsof", "-p", pid)
 	output, err = cmd.CombinedOutput()
 	outputStr := string(output)
@@ -233,7 +319,6 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 	}
 
 	// For security, we do NOT search PATH or try to guess locations
-	// If we can't determine the absolute path, we won't verify it
 	logger.Debug("cannot determine absolute path", "pid", pid, "path", path)
 	return "", false
 }
@@ -386,6 +471,10 @@ func displayProcess(output io.Writer, proc processInfo, info *signedby.Signature
 	var signer string
 	if proc.needsRoot {
 		signer = "need root"
+	} else if strings.HasPrefix(proc.path, "DELETED:") {
+		signer = "err: DELETED EXECUTABLE"
+	} else if proc.path == "" {
+		signer = "unresolvable"
 	} else {
 		signer = formatSigner(info)
 	}
