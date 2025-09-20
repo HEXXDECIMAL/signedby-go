@@ -2,45 +2,9 @@ package signedby
 
 import (
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
-
-func TestCacheDir(t *testing.T) {
-	dir := cacheDir()
-	if dir == "" {
-		t.Error("cacheDir() returned empty string")
-	}
-
-	switch runtime.GOOS {
-	case "darwin":
-		expected := filepath.Join(os.Getenv("HOME"), "Library", "Caches", "signedby")
-		if dir != expected {
-			t.Errorf("Unexpected cache dir on macOS: got %s, want %s", dir, expected)
-		}
-	case "windows":
-		expected := filepath.Join(os.Getenv("LOCALAPPDATA"), "signedby")
-		if dir != expected {
-			t.Errorf("Unexpected cache dir on Windows: got %s, want %s", dir, expected)
-		}
-	default:
-		home := os.Getenv("HOME")
-		xdgCache := os.Getenv("XDG_CACHE_HOME")
-		if xdgCache != "" {
-			expected := filepath.Join(xdgCache, "signedby")
-			if dir != expected {
-				t.Errorf("Unexpected cache dir with XDG_CACHE_HOME: got %s, want %s", dir, expected)
-			}
-		} else {
-			expected := filepath.Join(home, ".cache", "signedby")
-			if dir != expected {
-				t.Errorf("Unexpected cache dir on Linux/Unix: got %s, want %s", dir, expected)
-			}
-		}
-	}
-}
 
 func TestCacheOperations(t *testing.T) {
 	c := newCache()

@@ -3,10 +3,8 @@ package signedby
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -22,45 +20,25 @@ type cache struct {
 
 //nolint:govet // field alignment micro-optimization not needed
 type cacheEntry struct {
-	Info      *SignatureInfo `json:"info"`
-	Key       cacheKey       `json:"key"`
-	ExpiresAt time.Time      `json:"expires_at"`
+	Info      *SignatureInfo
+	Key       cacheKey
+	ExpiresAt time.Time
 }
 
 //nolint:govet // field alignment micro-optimization not needed
 type cacheKey struct {
-	Path    string    `json:"path"`
-	ModTime time.Time `json:"mod_time"`
-	Size    int64     `json:"size"`
-	Inode   uint64    `json:"inode"`
-	UID     uint32    `json:"uid"`
-	GID     uint32    `json:"gid"`
+	Path    string
+	ModTime time.Time
+	Size    int64
+	Inode   uint64
+	UID     uint32
+	GID     uint32
 }
 
 func newCache() *cache {
-	dir := cacheDir()
-	c := &cache{
+	return &cache{
 		entries: make(map[string]*cacheEntry),
-		dir:     dir,
-	}
-
-	_ = os.MkdirAll(dir, 0o755) //nolint:errcheck,gosec // best effort, dir needs to be readable
-	c.loadFromDisk()
-
-	return c
-}
-
-func cacheDir() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(os.Getenv("HOME"), "Library", "Caches", "signedby")
-	case "windows":
-		return filepath.Join(os.Getenv("LOCALAPPDATA"), "signedby")
-	default:
-		if xdgCache := os.Getenv("XDG_CACHE_HOME"); xdgCache != "" {
-			return filepath.Join(xdgCache, "signedby")
-		}
-		return filepath.Join(os.Getenv("HOME"), ".cache", "signedby")
+		dir:     "", // No longer using disk storage
 	}
 }
 
@@ -110,8 +88,6 @@ func (c *cache) set(path string, info *SignatureInfo) {
 	c.mu.Lock()
 	c.entries[hash] = entry
 	c.mu.Unlock()
-
-	go c.saveToDisk(hash, entry)
 }
 
 func (*cache) makeKey(path string) *cacheKey {
@@ -152,42 +128,4 @@ func (*cache) keyMatches(a, b *cacheKey) bool {
 		a.ModTime.Equal(b.ModTime) &&
 		a.UID == b.UID &&
 		a.GID == b.GID
-}
-
-func (c *cache) saveToDisk(hash string, entry *cacheEntry) {
-	path := filepath.Join(c.dir, hash+".json")
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0o600) //nolint:errcheck // best effort cache write
-}
-
-func (c *cache) loadFromDisk() {
-	files, err := filepath.Glob(filepath.Join(c.dir, "*.json"))
-	if err != nil {
-		return
-	}
-
-	now := time.Now()
-	for _, file := range files {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-
-		var entry cacheEntry
-		if err := json.Unmarshal(data, &entry); err != nil {
-			_ = os.Remove(file) //nolint:errcheck // cleanup
-			continue
-		}
-
-		if now.After(entry.ExpiresAt) {
-			_ = os.Remove(file) //nolint:errcheck // cleanup
-			continue
-		}
-
-		hash := c.hashKey(&entry.Key)
-		c.entries[hash] = &entry
-	}
 }
