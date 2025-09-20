@@ -8,16 +8,18 @@ import (
 )
 
 // SignatureInfo contains information about a binary's origin and signature.
+//
+//nolint:govet // field alignment micro-optimization not needed
 type SignatureInfo struct {
 	Path           string
-	IsPackaged     bool
 	PackageName    string
 	PackageVersion string
 	SignerOrg      string
-	IsPlatform     bool
 	SigningMethod  string
-	SignatureValid *bool
 	Extra          map[string]any
+	SignatureValid *bool
+	IsPackaged     bool
+	IsPlatform     bool
 }
 
 // Verifier is the interface for verifying binary signatures.
@@ -28,10 +30,10 @@ type Verifier interface {
 
 // VerifyOptions contains options for verification.
 type VerifyOptions struct {
+	Logger         *slog.Logger
+	Timeout        time.Duration
 	UseCache       bool
 	SkipValidation bool
-	Timeout        time.Duration
-	Logger         *slog.Logger
 }
 
 // New creates a new verifier without caching.
@@ -66,4 +68,9 @@ func defaultLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelError,
 	}))
+}
+
+// boolPtr returns a pointer to the given boolean value.
+func boolPtr(b bool) *bool {
+	return &b
 }

@@ -13,23 +13,26 @@ import (
 	"time"
 )
 
+//nolint:govet // field alignment micro-optimization not needed
 type cache struct {
 	mu      sync.RWMutex
 	entries map[string]*cacheEntry
 	dir     string
 }
 
+//nolint:govet // field alignment micro-optimization not needed
 type cacheEntry struct {
 	Info      *SignatureInfo `json:"info"`
 	Key       cacheKey       `json:"key"`
 	ExpiresAt time.Time      `json:"expires_at"`
 }
 
+//nolint:govet // field alignment micro-optimization not needed
 type cacheKey struct {
 	Path    string    `json:"path"`
-	Inode   uint64    `json:"inode"`
-	Size    int64     `json:"size"`
 	ModTime time.Time `json:"mod_time"`
+	Size    int64     `json:"size"`
+	Inode   uint64    `json:"inode"`
 	UID     uint32    `json:"uid"`
 	GID     uint32    `json:"gid"`
 }
@@ -41,7 +44,7 @@ func newCache() *cache {
 		dir:     dir,
 	}
 
-	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o755) //nolint:errcheck,gosec // best effort, dir needs to be readable
 	c.loadFromDisk()
 
 	return c
@@ -111,7 +114,7 @@ func (c *cache) set(path string, info *SignatureInfo) {
 	go c.saveToDisk(hash, entry)
 }
 
-func (c *cache) makeKey(path string) *cacheKey {
+func (*cache) makeKey(path string) *cacheKey {
 	stat, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -134,7 +137,7 @@ func (c *cache) makeKey(path string) *cacheKey {
 	return key
 }
 
-func (c *cache) hashKey(key *cacheKey) string {
+func (*cache) hashKey(key *cacheKey) string {
 	data := fmt.Sprintf("%s:%d:%d:%d:%d:%d",
 		key.Path, key.Inode, key.Size,
 		key.ModTime.Unix(), key.UID, key.GID)
@@ -142,7 +145,7 @@ func (c *cache) hashKey(key *cacheKey) string {
 	return hex.EncodeToString(hash[:])
 }
 
-func (c *cache) keyMatches(a, b *cacheKey) bool {
+func (*cache) keyMatches(a, b *cacheKey) bool {
 	return a.Path == b.Path &&
 		a.Inode == b.Inode &&
 		a.Size == b.Size &&
@@ -157,7 +160,7 @@ func (c *cache) saveToDisk(hash string, entry *cacheEntry) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	_ = os.WriteFile(path, data, 0o600) //nolint:errcheck // best effort cache write
 }
 
 func (c *cache) loadFromDisk() {
@@ -175,12 +178,12 @@ func (c *cache) loadFromDisk() {
 
 		var entry cacheEntry
 		if err := json.Unmarshal(data, &entry); err != nil {
-			os.Remove(file)
+			_ = os.Remove(file) //nolint:errcheck // cleanup
 			continue
 		}
 
 		if now.After(entry.ExpiresAt) {
-			os.Remove(file)
+			_ = os.Remove(file) //nolint:errcheck // cleanup
 			continue
 		}
 

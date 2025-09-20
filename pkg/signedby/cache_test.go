@@ -48,14 +48,18 @@ func TestCacheOperations(t *testing.T) {
 		t.Fatal("newCache() returned nil")
 	}
 
-	f, err := os.CreateTemp("", "test-binary-*")
+	f, err := os.CreateTemp(t.TempDir(), "test-binary-*")
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }() //nolint:errcheck // cleanup
 	testFile := f.Name()
-	_, _ = f.WriteString("test content")
-	f.Close()
+	if _, err := f.WriteString("test content"); err != nil {
+		t.Fatalf("Failed to write test content: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Failed to close file: %v", err)
+	}
 
 	info := &SignatureInfo{
 		Path:           testFile,
@@ -84,7 +88,9 @@ func TestCacheOperations(t *testing.T) {
 	}
 
 	time.Sleep(100 * time.Millisecond)
-	_ = os.Chtimes(testFile, time.Now(), time.Now())
+	if err := os.Chtimes(testFile, time.Now(), time.Now()); err != nil {
+		t.Fatalf("Failed to change file times: %v", err)
+	}
 
 	_, found = c.get(testFile)
 	if found {
@@ -95,13 +101,17 @@ func TestCacheOperations(t *testing.T) {
 func TestCacheKeyGeneration(t *testing.T) {
 	c := newCache()
 
-	f, err := os.CreateTemp("", "test-cache-key-*")
+	f, err := os.CreateTemp(t.TempDir(), "test-cache-key-*")
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	defer os.Remove(f.Name())
-	_, _ = f.WriteString("test")
-	f.Close()
+	defer func() { _ = os.Remove(f.Name()) }() //nolint:errcheck // cleanup
+	if _, err := f.WriteString("test"); err != nil {
+		t.Fatalf("Failed to write test content: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Failed to close file: %v", err)
+	}
 
 	key1 := c.makeKey(f.Name())
 	if key1 == nil {
@@ -128,13 +138,17 @@ func TestCacheExpiration(t *testing.T) {
 		dir:     "",
 	}
 
-	f, err := os.CreateTemp("", "test-expiration-*")
+	f, err := os.CreateTemp(t.TempDir(), "test-expiration-*")
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	defer os.Remove(f.Name())
-	_, _ = f.WriteString("test")
-	f.Close()
+	defer func() { _ = os.Remove(f.Name()) }() //nolint:errcheck // cleanup
+	if _, err := f.WriteString("test"); err != nil {
+		t.Fatalf("Failed to write test content: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Failed to close file: %v", err)
+	}
 
 	key := c.makeKey(f.Name())
 	if key == nil {

@@ -405,7 +405,3 @@ func isOSVendor(vendor string) bool {
 	}
 	return false
 }
-
-func boolPtr(b bool) *bool {
-	return &b
-}

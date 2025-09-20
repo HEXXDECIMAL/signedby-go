@@ -1,3 +1,4 @@
+// Package main implements the signedby command-line tool for verifying binary signatures.
 package main
 
 import (
@@ -20,8 +21,8 @@ func main() {
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <file>\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Verify the signature and origin of a binary file.\n\n")
-		fmt.Fprintf(os.Stderr, "Options:\n")
+		fmt.Fprint(os.Stderr, "Verify the signature and origin of a binary file.\n\n")
+		fmt.Fprint(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 	}
 
@@ -69,11 +70,12 @@ func printInfo(info *signedby.SignatureInfo) {
 	fmt.Printf("Path: %s\n", info.Path)
 
 	if info.IsPackaged || info.PackageName != "" {
-		if info.PackageVersion != "" {
+		switch {
+		case info.PackageVersion != "":
 			fmt.Printf("Package: %s %s\n", info.PackageName, info.PackageVersion)
-		} else if info.PackageName != "" {
+		case info.PackageName != "":
 			fmt.Printf("Package: %s\n", info.PackageName)
-		} else {
+		default:
 			fmt.Println("Package: Unknown")
 		}
 	} else {

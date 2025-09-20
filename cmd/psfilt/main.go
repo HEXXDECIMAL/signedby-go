@@ -1,3 +1,4 @@
+// Package main implements psfilt, a tool that filters process output to show signature information.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,9 +22,9 @@ import (
 
 type processInfo struct {
 	line      string
-	fields    []string
 	path      string
 	pid       string
+	fields    []string
 	needsRoot bool
 }
 
@@ -40,15 +42,15 @@ func main() {
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ps aux | %s [options]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Filter process list by signature status.\n\n")
-		fmt.Fprintf(os.Stderr, "Options:\n")
+		fmt.Fprint(os.Stderr, "Filter process list by signature status.\n\n")
+		fmt.Fprint(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 	}
 
 	flag.Parse()
 
 	if *unsignedOnly && *signedOnly {
-		fmt.Fprintf(os.Stderr, "Error: --unsigned and --signed are mutually exclusive\n")
+		fmt.Fprint(os.Stderr, "Error: --unsigned and --signed are mutually exclusive\n")
 		os.Exit(1)
 	}
 
@@ -77,14 +79,14 @@ func main() {
 }
 
 type options struct {
+	logger       *slog.Logger
+	format       string
+	timeout      time.Duration
 	unsignedOnly bool
 	signedOnly   bool
 	platformOnly bool
 	pidColumn    bool
-	format       string
 	noCache      bool
-	timeout      time.Duration
-	logger       *slog.Logger
 }
 
 func processPsOutput(input io.Reader, output io.Writer, opts *options) {
@@ -99,140 +101,164 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 		line := scanner.Text()
 
 		if !headerPrinted {
-			if strings.Contains(line, "PID") || strings.Contains(line, "USER") || strings.Contains(line, "UID") {
-				if opts.pidColumn {
-					fmt.Fprintf(output, "%s SIGNER\n", line)
-				} else {
-					fmt.Fprintln(output, line)
-				}
+			if printHeaderIfNeeded(output, line, opts) {
 				headerPrinted = true
 				continue
 			}
 		}
 
-		// Try to extract PID and command more flexibly
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
+		proc, shouldContinue := parseProcessLine(line, opts)
+		if shouldContinue {
 			continue
 		}
 
-		// Find the PID field (should be a number in position 1)
-		var pid, command string
-		pidFound := false
-		for i, field := range fields {
-			if !pidFound && i > 0 && i < 4 { // PID is usually in positions 1-3
-				if _, err := strconv.Atoi(field); err == nil {
-					pid = field
-					pidFound = true
-					// Command starts after some fixed fields
-					// ps aux: after field 10 (11th field)
-					// ps -afe: after field 7 (8th field)
-					cmdStartIdx := i + 6 // Default for ps -afe (UID PID PPID C STIME TTY TIME CMD)
-					if len(fields) > 10 && strings.Contains(fields[6], ":") && strings.Contains(fields[7], ":") {
-						// Likely ps aux format (has STAT and START columns)
-						cmdStartIdx = 10
-					}
-					if cmdStartIdx < len(fields) {
-						command = strings.Join(fields[cmdStartIdx:], " ")
-					}
-					break
-				}
-			}
-		}
-
-		if pid == "" || command == "" {
-			opts.logger.Debug("could not parse ps line", "line", line)
-			continue
-		}
-
-		// Get the actual executable path using ps -p <pid>
-		cmdPath, needsRoot := getExecutableForPID(pid, opts.logger)
-
-		// Handle special cases
-		if needsRoot {
-			// Mark this process as needing root but still show it
-			proc := processInfo{
-				line:      line,
-				fields:    fields,
-				path:      "", // Empty path will be handled specially
-				pid:       pid,
-				needsRoot: true,
-			}
-			processes = append(processes, proc)
-			continue
-		}
-
-		// Check if it's a deleted executable
-		if strings.HasPrefix(cmdPath, "DELETED:") {
-			// Handle deleted executables specially
-			proc := processInfo{
-				line:      line,
-				fields:    fields,
-				path:      cmdPath, // Keep the DELETED: prefix for special handling
-				pid:       pid,
-				needsRoot: false,
-			}
-			processes = append(processes, proc)
-			continue
-		}
-
-		if cmdPath == "" {
-			// Fallback to parsing command if ps -p fails
-			cmdPath = extractPath(command, opts.logger)
-			if cmdPath == "" {
-				opts.logger.Debug("cannot determine path", "pid", pid, "command", command)
-				// Still include the process but mark it as unresolvable
-				proc := processInfo{
-					line:      line,
-					fields:    fields,
-					path:      "", // Empty path for unresolvable
-					pid:       pid,
-					needsRoot: false,
-				}
-				processes = append(processes, proc)
-				continue
-			}
-		}
-
-		proc := processInfo{
-			line:      line,
-			fields:    fields,
-			path:      cmdPath,
-			pid:       pid,
-			needsRoot: false,
-		}
 		processes = append(processes, proc)
-		if !strings.HasPrefix(cmdPath, "DELETED:") {
-			pathSet[cmdPath] = true
+		if proc.path != "" && !strings.HasPrefix(proc.path, "DELETED:") {
+			pathSet[proc.path] = true
 		}
 	}
 
 	opts.logger.Debug("found unique binaries", "count", len(pathSet))
 
+	uniquePaths := collectUniquePaths(pathSet)
+	results := verifyBinaries(uniquePaths, opts)
+
+	displayProcessResults(output, processes, results, opts)
+}
+
+func printHeaderIfNeeded(output io.Writer, line string, opts *options) bool {
+	if strings.Contains(line, "PID") || strings.Contains(line, "USER") || strings.Contains(line, "UID") {
+		if opts.pidColumn {
+			_, _ = fmt.Fprintf(output, "%s SIGNER\n", line) //nolint:errcheck // writing to output
+		} else {
+			_, _ = fmt.Fprintln(output, line) //nolint:errcheck // writing to output
+		}
+		return true
+	}
+	return false
+}
+
+func parseProcessLine(line string, opts *options) (processInfo, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return processInfo{}, true
+	}
+
+	pid, command := extractPidAndCommand(fields)
+	if pid == "" || command == "" {
+		opts.logger.Debug("could not parse ps line", "line", line)
+		return processInfo{}, true
+	}
+
+	// Skip kernel threads on Linux
+	if isKernelThread(pid) {
+		opts.logger.Debug("skipping kernel thread", "pid", pid, "command", command)
+		return processInfo{}, true
+	}
+
+	return createProcessInfo(line, fields, pid, command, opts), false
+}
+
+func extractPidAndCommand(fields []string) (pid string, command string) {
+	for i, field := range fields {
+		if i > 0 && i < 4 { // PID is usually in positions 1-3
+			if _, err := strconv.Atoi(field); err == nil {
+				pid = field
+				cmdStartIdx := calculateCommandStartIndex(i, fields)
+				if cmdStartIdx < len(fields) {
+					command = strings.Join(fields[cmdStartIdx:], " ")
+				}
+				break
+			}
+		}
+	}
+	return pid, command
+}
+
+func calculateCommandStartIndex(pidIndex int, fields []string) int {
+	// Default for ps -afe (UID PID PPID C STIME TTY TIME CMD)
+	cmdStartIdx := pidIndex + 6
+	if len(fields) > 10 && strings.Contains(fields[6], ":") && strings.Contains(fields[7], ":") {
+		// Likely ps aux format (has STAT and START columns)
+		cmdStartIdx = 10
+	}
+	return cmdStartIdx
+}
+
+func createProcessInfo(line string, fields []string, pid, command string, opts *options) processInfo {
+	cmdPath, needsRoot := getExecutableForPID(pid, opts.logger)
+
+	// Handle special cases
+	if needsRoot {
+		return processInfo{
+			line:      line,
+			fields:    fields,
+			path:      "", // Empty path will be handled specially
+			pid:       pid,
+			needsRoot: true,
+		}
+	}
+
+	if strings.HasPrefix(cmdPath, "DELETED:") {
+		return processInfo{
+			line:      line,
+			fields:    fields,
+			path:      cmdPath, // Keep the DELETED: prefix for special handling
+			pid:       pid,
+			needsRoot: false,
+		}
+	}
+
+	if cmdPath == "" {
+		cmdPath = extractPath(command, opts.logger)
+		if cmdPath == "" {
+			opts.logger.Debug("cannot determine path", "pid", pid, "command", command)
+			return processInfo{
+				line:      line,
+				fields:    fields,
+				path:      "", // Empty path for unresolvable
+				pid:       pid,
+				needsRoot: false,
+			}
+		}
+	}
+
+	return processInfo{
+		line:      line,
+		fields:    fields,
+		path:      cmdPath,
+		pid:       pid,
+		needsRoot: false,
+	}
+}
+
+func collectUniquePaths(pathSet map[string]bool) []string {
 	uniquePaths := make([]string, 0, len(pathSet))
 	for path := range pathSet {
 		uniquePaths = append(uniquePaths, path)
 	}
+	return uniquePaths
+}
 
-	results := verifyBinaries(uniquePaths, opts)
-
+func displayProcessResults(output io.Writer, processes []processInfo, results map[string]*signedby.SignatureInfo, opts *options) {
 	for _, proc := range processes {
-		if proc.needsRoot {
+		switch {
+		case proc.needsRoot:
 			// Always display processes that need root
 			if !opts.signedOnly {
 				displayProcess(output, proc, nil, opts)
 			}
-		} else if strings.HasPrefix(proc.path, "DELETED:") {
+		case strings.HasPrefix(proc.path, "DELETED:"):
 			// Always display deleted executables with special marker
 			if !opts.signedOnly {
 				displayProcess(output, proc, nil, opts)
 			}
-		} else if proc.path == "" {
+		case proc.path == "":
 			// Process with unresolvable path
 			if !opts.signedOnly {
 				displayProcess(output, proc, nil, opts)
 			}
-		} else {
+		default:
 			info := results[proc.path]
 			if shouldDisplay(info, opts) {
 				displayProcess(output, proc, info, opts)
@@ -243,7 +269,7 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 
 func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 	// On Linux, first try /proc/<pid>/exe which is most reliable
-	procExePath := filepath.Join("/proc", pid, "exe")
+	procExePath := "/proc/" + pid + "/exe"
 	if target, err := os.Readlink(procExePath); err == nil {
 		// Successfully read the symlink
 		// Check if the executable has been deleted
@@ -258,7 +284,7 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 		// Permission denied - need root
 		logger.Debug("need root access for /proc/PID/exe", "pid", pid, "error", err)
 		// Try to get at least the command name for display
-		cmdlinePath := filepath.Join("/proc", pid, "cmdline")
+		cmdlinePath := "/proc/" + pid + "/cmdline"
 		if cmdline, err := os.ReadFile(cmdlinePath); err == nil && len(cmdline) > 0 {
 			// cmdline is null-separated, get first part
 			parts := strings.Split(string(cmdline), "\x00")
@@ -323,6 +349,53 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 	return "", false
 }
 
+// isKernelThread checks if a process is a kernel thread on Linux
+// by reading the flags field from /proc/[pid]/stat and checking for PF_KTHREAD.
+// Returns true if it's a kernel thread, false otherwise or if unable to determine.
+func isKernelThread(pid string) bool {
+	// Only check on Linux
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
+	// PF_KTHREAD flag value (0x00200000) - stable since Linux 2.6.17
+	const pfKthread = 0x00200000
+
+	statPath := "/proc/" + pid + "/stat"
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		return false
+	}
+
+	// The stat file format: pid (comm) state ... flags ...
+	// We need to find the end of the command field (last ')') and then parse fields
+	statStr := string(data)
+	lastParen := strings.LastIndex(statStr, ")")
+	if lastParen == -1 {
+		return false
+	}
+
+	// Fields after the command are space-separated
+	fieldsStr := statStr[lastParen+1:]
+	fields := strings.Fields(fieldsStr)
+
+	// The flags field is the 8th field after the command (0-indexed, so index 7)
+	// Total fields in stat: pid (comm) + 51 more fields
+	// flags is field 8 after comm
+	if len(fields) < 8 {
+		return false
+	}
+
+	// Parse the flags field
+	flags, err := strconv.ParseUint(fields[7], 10, 64)
+	if err != nil {
+		return false
+	}
+
+	// Check if PF_KTHREAD bit is set
+	return (flags & pfKthread) != 0
+}
+
 func extractPath(command string, logger *slog.Logger) string {
 	command = strings.TrimSpace(command)
 
@@ -333,44 +406,62 @@ func extractPath(command string, logger *slog.Logger) string {
 
 	// Handle paths with spaces - look for common patterns
 	// Try to find .app paths first (macOS specific)
-	if strings.Contains(command, ".app/") {
-		// Find the start of the path (usually starts with /)
-		startIdx := strings.Index(command, "/")
-		if startIdx >= 0 {
-			path := command[startIdx:]
-
-			// For .app bundles with spaces, we need to be careful
-			// Check if there's a flag argument first
-			if idx := strings.Index(path, " -"); idx > 0 {
-				path = path[:idx]
-			} else {
-				// Look for space followed by another absolute path (likely an argument)
-				// Split by spaces and reconstruct
-				parts := strings.Split(path, " ")
-				fullPath := ""
-				for i, part := range parts {
-					// If we encounter another absolute path, stop
-					if i > 0 && strings.HasPrefix(part, "/") {
-						break
-					}
-					// If we encounter a flag, stop
-					if strings.HasPrefix(part, "-") {
-						break
-					}
-					if fullPath != "" {
-						fullPath += " "
-					}
-					fullPath += part
-				}
-				path = fullPath
-			}
-
-			path = strings.TrimSpace(path)
-			logger.Debug("found app bundle path", "path", path)
-			return path
-		}
+	if appPath := extractAppBundlePath(command, logger); appPath != "" {
+		return appPath
 	}
 
+	return extractSimplePath(command, logger)
+}
+
+func extractAppBundlePath(command string, logger *slog.Logger) string {
+	if !strings.Contains(command, ".app/") {
+		return ""
+	}
+
+	// Find the start of the path (usually starts with /)
+	startIdx := strings.Index(command, "/")
+	if startIdx < 0 {
+		return ""
+	}
+
+	path := command[startIdx:]
+	path = cleanAppBundlePath(path)
+	path = strings.TrimSpace(path)
+	logger.Debug("found app bundle path", "path", path)
+	return path
+}
+
+func cleanAppBundlePath(path string) string {
+	// Check if there's a flag argument first
+	if idx := strings.Index(path, " -"); idx > 0 {
+		return path[:idx]
+	}
+
+	// Look for space followed by another absolute path (likely an argument)
+	return reconstructPathFromParts(path)
+}
+
+func reconstructPathFromParts(path string) string {
+	parts := strings.Split(path, " ")
+	fullPath := ""
+	for i, part := range parts {
+		// If we encounter another absolute path, stop
+		if i > 0 && strings.HasPrefix(part, "/") {
+			break
+		}
+		// If we encounter a flag, stop
+		if strings.HasPrefix(part, "-") {
+			break
+		}
+		if fullPath != "" {
+			fullPath += " "
+		}
+		fullPath += part
+	}
+	return fullPath
+}
+
+func extractSimplePath(command string, logger *slog.Logger) string {
 	// Fall back to simple field splitting for paths without spaces
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
@@ -386,6 +477,10 @@ func extractPath(command string, logger *slog.Logger) string {
 
 	executable = strings.TrimSuffix(executable, ":")
 
+	return validateAndReturnPath(executable, logger)
+}
+
+func validateAndReturnPath(executable string, logger *slog.Logger) string {
 	if filepath.IsAbs(executable) {
 		logger.Debug("found absolute path", "path", executable)
 		return executable
@@ -432,7 +527,6 @@ func verifyBinaries(paths []string, opts *options) map[string]*signedby.Signatur
 				Timeout:        opts.timeout,
 				Logger:         opts.logger,
 			})
-
 			if err != nil {
 				opts.logger.Debug("verification failed", "path", p, "error", err)
 			}
@@ -469,27 +563,29 @@ func shouldDisplay(info *signedby.SignatureInfo, opts *options) bool {
 
 func displayProcess(output io.Writer, proc processInfo, info *signedby.SignatureInfo, opts *options) {
 	var signer string
-	if proc.needsRoot {
+	switch {
+	case proc.needsRoot:
 		signer = "need root"
-	} else if strings.HasPrefix(proc.path, "DELETED:") {
+	case strings.HasPrefix(proc.path, "DELETED:"):
 		signer = "err: DELETED EXECUTABLE"
-	} else if proc.path == "" {
+	case proc.path == "":
 		signer = "unresolvable"
-	} else {
+	default:
 		signer = formatSigner(info)
 	}
 
-	if opts.pidColumn {
-		fmt.Fprintf(output, "%s %s %s\n", proc.pid, proc.line, signer)
-	} else if opts.format != "" {
+	switch {
+	case opts.pidColumn:
+		_, _ = fmt.Fprintf(output, "%s %s %s\n", proc.pid, proc.line, signer) //nolint:errcheck // writing to output
+	case opts.format != "":
 		formatted := opts.format
 		formatted = strings.ReplaceAll(formatted, "%pid", proc.pid)
 		formatted = strings.ReplaceAll(formatted, "%path", proc.path)
 		formatted = strings.ReplaceAll(formatted, "%signer", signer)
 		formatted = strings.ReplaceAll(formatted, "%line", proc.line)
-		fmt.Fprintln(output, formatted)
-	} else {
-		fmt.Fprintf(output, "%s [%s]\n", proc.line, signer)
+		_, _ = fmt.Fprintln(output, formatted) //nolint:errcheck // writing to output
+	default:
+		_, _ = fmt.Fprintf(output, "%s [%s]\n", proc.line, signer) //nolint:errcheck // writing to output
 	}
 }
 

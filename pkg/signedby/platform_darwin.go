@@ -24,75 +24,109 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 		Extra:         make(map[string]any),
 	}
 
-	cmd := exec.CommandContext(ctx, "codesign", "-dvvv", path)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	output := stderr.String()
-
+	output, stdout, err := runCodesign(ctx, path)
 	if err != nil {
-		// Check various unsigned states
-		outputLower := strings.ToLower(output)
-		if strings.Contains(outputLower, "not signed") ||
-			strings.Contains(outputLower, "unsigned") ||
-			strings.Contains(outputLower, "ad-hoc") {
-			logger.Debug("binary is not signed or ad-hoc signed", "path", path)
-			info.SignatureValid = boolPtr(false)
-			// Extract any partial info we can from the output
-			if strings.Contains(output, "Identifier=") {
-				for _, line := range strings.Split(output, "\n") {
-					if strings.HasPrefix(line, "Identifier=") {
-						info.PackageName = strings.TrimPrefix(line, "Identifier=")
-						break
-					}
-				}
-			}
-			return info, nil
-		}
-
-		// Check for other known issues
-		if strings.Contains(outputLower, "not a mach-o file") ||
-		   strings.Contains(outputLower, "is not an app bundle") ||
-		   strings.Contains(outputLower, "a sealed resource is missing") {
-			logger.Debug("binary cannot be verified", "path", path, "reason", output)
-			info.SignatureValid = boolPtr(false)
-			info.Extra["verifyError"] = strings.TrimSpace(output)
-			return info, nil
-		}
-
-		// Unknown error - log full details to help debug
-		trimmedOutput := strings.TrimSpace(output)
-		if trimmedOutput == "" {
-			trimmedOutput = "(no output from codesign)"
-		}
-		logger.Error("codesign failed",
-			"path", path,
-			"error", err,
-			"stderr", trimmedOutput,
-			"stdout", strings.TrimSpace(stdout.String()))
-		info.SignatureValid = boolPtr(false)
-		info.Extra["codesignError"] = err.Error()
-		if len(trimmedOutput) > 0 && len(trimmedOutput) < 500 {
-			info.Extra["details"] = trimmedOutput
-		}
-		return info, nil
+		return handleCodesignError(err, output, stdout, info, logger, path)
 	}
 
 	logger.Debug("codesign output received", "path", path, "outputLength", len(output))
 
-	isPlatformBinary := false
-	var authorities []string
+	isPlatformBinary, authorities := parseCodesignOutput(output, info)
 
+	setSignatureInfo(info, authorities, isPlatformBinary)
+	applyAppleSpecificRules(info)
+
+	if !opts.SkipValidation && info.SignatureValid != nil && *info.SignatureValid {
+		performDeepValidation(ctx, path, info)
+	}
+
+	return info, nil
+}
+
+func runCodesign(ctx context.Context, path string) (stderr string, stdout string, err error) {
+	cmd := exec.CommandContext(ctx, "codesign", "-dvvv", path)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err = cmd.Run()
+	return stderrBuf.String(), stdoutBuf.String(), err
+}
+
+func handleCodesignError(err error, output, stdout string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {
+	outputLower := strings.ToLower(output)
+
+	if isUnsignedBinary(outputLower) {
+		return handleUnsignedBinary(output, info, logger, path)
+	}
+
+	if isKnownVerificationIssue(outputLower) {
+		return handleVerificationIssue(output, info, logger, path)
+	}
+
+	return handleUnknownError(err, output, stdout, info, logger, path)
+}
+
+func isUnsignedBinary(outputLower string) bool {
+	return strings.Contains(outputLower, "not signed") ||
+		strings.Contains(outputLower, "unsigned") ||
+		strings.Contains(outputLower, "ad-hoc")
+}
+
+func isKnownVerificationIssue(outputLower string) bool {
+	return strings.Contains(outputLower, "not a mach-o file") ||
+		strings.Contains(outputLower, "is not an app bundle") ||
+		strings.Contains(outputLower, "a sealed resource is missing")
+}
+
+func handleUnsignedBinary(output string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {
+	logger.Debug("binary is not signed or ad-hoc signed", "path", path)
+	info.SignatureValid = boolPtr(false)
+
+	// Extract any partial info we can from the output
+	if strings.Contains(output, "Identifier=") {
+		for _, line := range strings.Split(output, "\n") {
+			if strings.HasPrefix(line, "Identifier=") {
+				info.PackageName = strings.TrimPrefix(line, "Identifier=")
+				break
+			}
+		}
+	}
+	return info, nil
+}
+
+func handleVerificationIssue(output string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {
+	logger.Debug("binary cannot be verified", "path", path, "reason", output)
+	info.SignatureValid = boolPtr(false)
+	info.Extra["verifyError"] = strings.TrimSpace(output)
+	return info, nil
+}
+
+func handleUnknownError(err error, output, stdout string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {
+	trimmedOutput := strings.TrimSpace(output)
+	if trimmedOutput == "" {
+		trimmedOutput = "(no output from codesign)"
+	}
+	logger.Error("codesign failed",
+		"path", path,
+		"error", err,
+		"stderr", trimmedOutput,
+		"stdout", strings.TrimSpace(stdout))
+	info.SignatureValid = boolPtr(false)
+	info.Extra["codesignError"] = err.Error()
+	if trimmedOutput != "" && len(trimmedOutput) < 500 {
+		info.Extra["details"] = trimmedOutput
+	}
+	return info, nil
+}
+
+func parseCodesignOutput(output string, info *SignatureInfo) (isPlatformBinary bool, authorities []string) {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 
-		if strings.HasPrefix(line, "Platform Binary=") {
-			if strings.Contains(line, "=Yes") {
-				isPlatformBinary = true
-				info.IsPlatform = true
-			}
+		if strings.HasPrefix(line, "Platform Binary=") && strings.Contains(line, "=Yes") {
+			isPlatformBinary = true
+			info.IsPlatform = true
 		}
 
 		if strings.HasPrefix(line, "Authority=") {
@@ -108,7 +142,6 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 		if strings.HasPrefix(line, "Identifier=") {
 			identifier := strings.TrimPrefix(line, "Identifier=")
 			info.Extra["identifier"] = identifier
-			// Use identifier as package name for macOS
 			if info.PackageName == "" {
 				info.PackageName = identifier
 			}
@@ -120,6 +153,10 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 		}
 	}
 
+	return isPlatformBinary, authorities
+}
+
+func setSignatureInfo(info *SignatureInfo, authorities []string, isPlatformBinary bool) {
 	if len(authorities) > 0 {
 		info.SignerOrg = extractOrgFromAuthority(authorities[0])
 		info.Extra["authorities"] = authorities
@@ -131,7 +168,9 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 	if isPlatformBinary && info.SignerOrg == "" {
 		info.SignerOrg = "Apple"
 	}
+}
 
+func applyAppleSpecificRules(info *SignatureInfo) {
 	if identifier, ok := info.Extra["identifier"].(string); ok {
 		if strings.HasPrefix(identifier, "com.apple.") {
 			info.IsPlatform = true
@@ -140,16 +179,14 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 			}
 		}
 	}
+}
 
-	if !opts.SkipValidation && info.SignatureValid != nil && *info.SignatureValid {
-		validateCmd := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", path)
-		if err := validateCmd.Run(); err != nil {
-			info.SignatureValid = boolPtr(false)
-			info.Extra["validationError"] = err.Error()
-		}
+func performDeepValidation(ctx context.Context, path string, info *SignatureInfo) {
+	validateCmd := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", path)
+	if err := validateCmd.Run(); err != nil {
+		info.SignatureValid = boolPtr(false)
+		info.Extra["validationError"] = err.Error()
 	}
-
-	return info, nil
 }
 
 func extractOrgFromAuthority(authority string) string {
@@ -179,8 +216,4 @@ func extractOrgFromAuthority(authority string) string {
 	}
 
 	return authority
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

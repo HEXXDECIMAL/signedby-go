@@ -31,7 +31,3 @@ func verifyFreeBSD(ctx context.Context, path string, opts VerifyOptions) (*Signa
 		Extra: map[string]any{"error": "freebsd not supported on this platform"},
 	}, nil
 }
-
-func boolPtr(b bool) *bool {
-	return &b
-}
