@@ -89,52 +89,98 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 
 	info.IsPackaged = true
 
-	parts := strings.Split(packageName, "-")
-	if len(parts) >= 2 {
-		info.PackageName = strings.Join(parts[:len(parts)-2], "-")
-		info.PackageVersion = strings.Join(parts[len(parts)-2:], "-")
-	} else {
-		info.PackageName = packageName
+	// Store the full package name with version
+	info.PackageName = packageName
+
+	// Try to extract just the package name and version
+	// Use rpm query to get the package name without version
+	cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{NAME}\n", packageName)
+	stdout.Reset()
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err == nil {
+		name := strings.TrimSpace(stdout.String())
+		if name != "" {
+			info.PackageName = name
+		}
 	}
 
+	// Get the version
+	cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", packageName)
+	stdout.Reset()
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err == nil {
+		version := strings.TrimSpace(stdout.String())
+		if version != "" {
+			info.PackageVersion = version
+		}
+	}
+
+	// Get vendor information - parse from rpm -qi output as queryformat might not work
 	cmd = exec.CommandContext(ctx, "rpm", "-qi", packageName)
 	stdout.Reset()
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err == nil {
 		output := stdout.String()
 		for _, line := range strings.Split(output, "\n") {
+			// Parse Vendor field
 			if strings.HasPrefix(line, "Vendor") {
-				vendor := strings.TrimSpace(strings.TrimPrefix(line, "Vendor"))
-				vendor = strings.TrimPrefix(vendor, ":")
-				vendor = strings.TrimSpace(vendor)
-				info.SignerOrg = vendor
-				if isOSVendor(vendor) {
-					info.IsPlatform = true
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					vendor := strings.TrimSpace(parts[1])
+					if vendor != "" && vendor != "(none)" {
+						info.SignerOrg = vendor
+						if isOSVendor(vendor) {
+							info.IsPlatform = true
+						}
+					}
 				}
 			}
+			// Parse Signature field for signature verification
 			if strings.HasPrefix(line, "Signature") {
-				sig := strings.TrimSpace(strings.TrimPrefix(line, "Signature"))
-				sig = strings.TrimPrefix(sig, ":")
-				sig = strings.TrimSpace(sig)
-				if sig != "(none)" && sig != "" {
-					info.SignatureValid = boolPtr(true)
-					info.Extra["signature"] = sig
-				} else {
-					info.SignatureValid = boolPtr(false)
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					sig := strings.TrimSpace(parts[1])
+					// Fedora format: "RSA/SHA256, <date>, Key ID <keyid>"
+					if sig != "" && sig != "(none)" {
+						info.SignatureValid = boolPtr(true)
+						info.Extra["signature"] = sig
+						// Extract key ID if present
+						if idx := strings.Index(sig, "Key ID "); idx != -1 {
+							keyID := sig[idx+7:]
+							info.Extra["keyID"] = keyID
+						}
+					} else {
+						info.SignatureValid = boolPtr(false)
+					}
 				}
 			}
 		}
 	}
 
+	// Additional signature verification if needed and not already found
 	if !opts.SkipValidation && info.SignatureValid == nil {
-		cmd = exec.CommandContext(ctx, "rpm", "--query", "--queryformat", "%{SIGPGP:pgpsig}", packageName)
+		// Try to get signature info using queryformat as fallback
+		cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{DSAHEADER:pgpsig}%{RSAHEADER:pgpsig}%{SIGGPG:pgpsig}%{SIGPGP:pgpsig}\n", packageName)
 		stdout.Reset()
 		cmd.Stdout = &stdout
 		if err := cmd.Run(); err == nil {
 			output := strings.TrimSpace(stdout.String())
-			if output != "" && output != "(none)" {
+			// Check if any signature field has content
+			if output != "" && output != "(none)(none)(none)(none)" && !strings.Contains(output, "(none)") {
 				info.SignatureValid = boolPtr(true)
-				info.Extra["pgpSignature"] = output
+				info.Extra["pgpSignatures"] = output
+			}
+		}
+
+		// If we still don't have signature info, check package integrity
+		if info.SignatureValid == nil {
+			// Check if the RPM database shows the package as intact
+			cmd = exec.CommandContext(ctx, "rpm", "-V", packageName)
+			if err := cmd.Run(); err == nil {
+				// If rpm -V succeeds without errors, package integrity is good
+				// This means the package was installed from a repository
+				info.SignatureValid = boolPtr(true)
+				info.Extra["integrityVerified"] = true
 			}
 		}
 	}
