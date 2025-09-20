@@ -150,10 +150,21 @@ func parseProcessLine(line string, opts *options) (processInfo, bool) {
 		return processInfo{}, true
 	}
 
-	// Skip kernel threads on Linux
+	// Check if it's a kernel thread on Linux
 	if isKernelThread(pid) {
-		opts.logger.Debug("skipping kernel thread", "pid", pid, "command", command)
-		return processInfo{}, true
+		opts.logger.Debug("found kernel thread", "pid", pid, "command", command)
+		if opts.unsignedOnly {
+			// Skip kernel threads when showing unsigned only
+			return processInfo{}, true
+		}
+		// Return a special process info for kernel threads - don't try to extract path
+		return processInfo{
+			line:      line,
+			fields:    fields,
+			path:      "KERNEL_THREAD", // Special marker
+			pid:       pid,
+			needsRoot: false,
+		}, false
 	}
 
 	return createProcessInfo(line, fields, pid, command, opts), false
@@ -243,6 +254,11 @@ func collectUniquePaths(pathSet map[string]bool) []string {
 func displayProcessResults(output io.Writer, processes []processInfo, results map[string]*signedby.SignatureInfo, opts *options) {
 	for _, proc := range processes {
 		switch {
+		case proc.path == "KERNEL_THREAD":
+			// Display kernel threads with special marker
+			if !opts.signedOnly {
+				displayProcess(output, proc, nil, opts)
+			}
 		case proc.needsRoot:
 			// Always display processes that need root
 			if !opts.signedOnly {
@@ -564,6 +580,8 @@ func shouldDisplay(info *signedby.SignatureInfo, opts *options) bool {
 func displayProcess(output io.Writer, proc processInfo, info *signedby.SignatureInfo, opts *options) {
 	var signer string
 	switch {
+	case proc.path == "KERNEL_THREAD":
+		signer = "kernel thread"
 	case proc.needsRoot:
 		signer = "need root"
 	case strings.HasPrefix(proc.path, "DELETED:"):
