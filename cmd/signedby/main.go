@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/tstromberg/signedby-go/pkg/signedby"
+	"github.com/HEXXDECIMAL/signedby-go/pkg/signedby"
 )
 
 func main() {

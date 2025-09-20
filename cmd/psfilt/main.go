@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tstromberg/signedby-go/pkg/signedby"
+	"github.com/HEXXDECIMAL/signedby-go/pkg/signedby"
 )
 
 type processInfo struct {

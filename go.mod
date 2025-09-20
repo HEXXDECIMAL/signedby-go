@@ -1,3 +1,3 @@
-module github.com/tstromberg/signedby-go
+module github.com/HEXXDECIMAL/signedby-go
 
 go 1.21
