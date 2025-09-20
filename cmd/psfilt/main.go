@@ -379,15 +379,15 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 }
 
 // isKernelThread checks if a process is a kernel thread on Linux.
-// On Linux, all kernel threads have ppid=2 (kthreadd).
-func isKernelThread(_ string, ppid string) bool {
+// On Linux, all kernel threads have ppid=2 (kthreadd), and kthreadd itself has pid=2.
+func isKernelThread(pid string, ppid string) bool {
 	// Only check on Linux
 	if runtime.GOOS != "linux" {
 		return false
 	}
 
-	// All kernel threads have ppid=2 (kthreadd)
-	return ppid == "2"
+	// PID 2 is kthreadd itself, and all kernel threads have ppid=2
+	return pid == "2" || ppid == "2"
 }
 
 func extractPath(command string, logger *slog.Logger) string {
