@@ -61,7 +61,7 @@ func NewWithLogger(logger *slog.Logger, useCache bool) Verifier {
 	return v
 }
 
-// defaultLogger creates a logger that only shows errors to stderr
+// defaultLogger creates a logger that only shows errors to stderr.
 func defaultLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelError,

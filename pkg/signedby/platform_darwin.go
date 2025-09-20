@@ -36,8 +36,8 @@ func verifyDarwin(ctx context.Context, path string, opts VerifyOptions) (*Signat
 		// Check various unsigned states
 		outputLower := strings.ToLower(output)
 		if strings.Contains(outputLower, "not signed") ||
-		   strings.Contains(outputLower, "unsigned") ||
-		   strings.Contains(outputLower, "ad-hoc") {
+			strings.Contains(outputLower, "unsigned") ||
+			strings.Contains(outputLower, "ad-hoc") {
 			logger.Debug("binary is not signed or ad-hoc signed", "path", path)
 			info.SignatureValid = boolPtr(false)
 			// Extract any partial info we can from the output

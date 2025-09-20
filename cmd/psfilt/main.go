@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -182,7 +183,8 @@ func processPsOutput(input io.Reader, output io.Writer, opts *options) {
 
 func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 	// First try ps -p <pid> -o comm= to get the executable path
-	cmd := exec.Command("ps", "-p", pid, "-o", "comm=")
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "ps", "-p", pid, "-o", "comm=")
 	output, err := cmd.Output()
 	if err != nil {
 		logger.Debug("failed to get executable for PID", "pid", pid, "error", err)
@@ -202,13 +204,13 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 
 	// For non-absolute paths, try to get the real binary using lsof
 	// Look specifically for the txt (text/executable) file descriptor
-	cmd = exec.Command("sh", "-c", fmt.Sprintf("lsof -p %s 2>&1", pid))
-	output, err = cmd.Output()
+	cmd = exec.CommandContext(ctx, "lsof", "-p", pid)
+	output, err = cmd.CombinedOutput()
 	outputStr := string(output)
 
 	// Check if we need root access
 	if err != nil && (strings.Contains(outputStr, "Permission denied") ||
-	                  strings.Contains(outputStr, "Operation not permitted")) {
+		strings.Contains(outputStr, "Operation not permitted")) {
 		logger.Debug("need root access for PID", "pid", pid, "path", path)
 		return path, true // Return path and needsRoot=true
 	}
