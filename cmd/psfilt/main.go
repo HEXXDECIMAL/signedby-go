@@ -150,9 +150,22 @@ func parseProcessLine(line string, opts *options) (processInfo, bool) {
 		return processInfo{}, true
 	}
 
-	// Check if it's a kernel thread on Linux
-	if isKernelThread(pid) {
-		opts.logger.Debug("found kernel thread", "pid", pid, "command", command)
+	// Extract ppid (usually field 2 in ps -afe output: UID PID PPID ...)
+	ppid := ""
+	if len(fields) > 2 {
+		// Find the PID position first
+		for i, field := range fields {
+			if field == pid && i+1 < len(fields) {
+				// PPID is the field right after PID
+				ppid = fields[i+1]
+				break
+			}
+		}
+	}
+
+	// Check if it's a kernel thread on Linux (ppid=2)
+	if isKernelThread(pid, ppid) {
+		opts.logger.Debug("detected kernel thread (ppid=2)", "pid", pid, "ppid", ppid, "command", command)
 		if opts.unsignedOnly {
 			// Skip kernel threads when showing unsigned only
 			return processInfo{}, true
@@ -365,51 +378,16 @@ func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
 	return "", false
 }
 
-// isKernelThread checks if a process is a kernel thread on Linux
-// by reading the flags field from /proc/[pid]/stat and checking for PF_KTHREAD.
-// Returns true if it's a kernel thread, false otherwise or if unable to determine.
-func isKernelThread(pid string) bool {
+// isKernelThread checks if a process is a kernel thread on Linux.
+// On Linux, all kernel threads have ppid=2 (kthreadd).
+func isKernelThread(pid string, ppid string) bool {
 	// Only check on Linux
 	if runtime.GOOS != "linux" {
 		return false
 	}
 
-	// PF_KTHREAD flag value (0x00200000) - stable since Linux 2.6.17
-	const pfKthread = 0x00200000
-
-	statPath := "/proc/" + pid + "/stat"
-	data, err := os.ReadFile(statPath)
-	if err != nil {
-		return false
-	}
-
-	// The stat file format: pid (comm) state ... flags ...
-	// We need to find the end of the command field (last ')') and then parse fields
-	statStr := string(data)
-	lastParen := strings.LastIndex(statStr, ")")
-	if lastParen == -1 {
-		return false
-	}
-
-	// Fields after the command are space-separated
-	fieldsStr := statStr[lastParen+1:]
-	fields := strings.Fields(fieldsStr)
-
-	// The flags field is the 8th field after the command (0-indexed, so index 7)
-	// Total fields in stat: pid (comm) + 51 more fields
-	// flags is field 8 after comm
-	if len(fields) < 8 {
-		return false
-	}
-
-	// Parse the flags field
-	flags, err := strconv.ParseUint(fields[7], 10, 64)
-	if err != nil {
-		return false
-	}
-
-	// Check if PF_KTHREAD bit is set
-	return (flags & pfKthread) != 0
+	// All kernel threads have ppid=2 (kthreadd)
+	return ppid == "2"
 }
 
 func extractPath(command string, logger *slog.Logger) string {
