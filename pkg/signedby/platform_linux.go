@@ -89,6 +89,8 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 
 	info.IsPackaged = true
 
+	opts.Logger.Debug("rpm -qf output", "path", path, "output", output)
+
 	// Handle multiple packages (when file belongs to multiple versions)
 	// rpm -qf lists packages with most recent last, so we'll use the last one
 	packages := strings.Split(output, "\n")
@@ -106,6 +108,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 	var packageName string
 	if len(validPackages) > 0 {
 		packageName = validPackages[len(validPackages)-1]
+		opts.Logger.Debug("selected package", "packageName", packageName, "totalPackages", len(validPackages))
 		// Store all packages in Extra for reference
 		if len(validPackages) > 1 {
 			info.Extra["allPackages"] = validPackages
@@ -117,13 +120,31 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 	}
 
 	// Get just the package name
+	// packageName is like "bash-5.2.37-1.fc42.aarch64", we can query it directly
 	cmd = exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{NAME}", packageName)
 	stdout.Reset()
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err == nil {
 		name := strings.TrimSpace(stdout.String())
+		opts.Logger.Debug("rpm query result", "packageName", packageName, "name", name)
 		if name != "" {
 			info.PackageName = name
+		} else {
+			// Fallback: extract name from package string (e.g., "bash" from "bash-5.2.37-1.fc42.aarch64")
+			parts := strings.Split(packageName, "-")
+			if len(parts) > 0 {
+				info.PackageName = parts[0]
+			}
+		}
+	} else {
+		opts.Logger.Debug("rpm query failed", "packageName", packageName, "err", err)
+		// If rpm query fails, try to extract the package name from the full string
+		// Package format is typically: name-version-release.arch
+		parts := strings.Split(packageName, "-")
+		if len(parts) > 0 {
+			info.PackageName = parts[0]
+		} else {
+			info.PackageName = packageName
 		}
 	}
 
@@ -135,6 +156,18 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		version := strings.TrimSpace(stdout.String())
 		if version != "" {
 			info.PackageVersion = version
+		}
+	} else {
+		// Try to extract version from package string
+		parts := strings.Split(packageName, "-")
+		if len(parts) >= 3 {
+			// Remove arch suffix if present
+			lastPart := parts[len(parts)-1]
+			if strings.Contains(lastPart, ".") && (strings.HasSuffix(lastPart, "64") || strings.HasSuffix(lastPart, "86")) {
+				lastPart = strings.Split(lastPart, ".")[0]
+				parts[len(parts)-1] = lastPart
+			}
+			info.PackageVersion = strings.Join(parts[1:], "-")
 		}
 	}
 
@@ -208,6 +241,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		}
 	}
 
+	opts.Logger.Debug("final RPM info", "packageName", info.PackageName, "version", info.PackageVersion, "vendor", info.SignerOrg)
 	return info, nil
 }
 
