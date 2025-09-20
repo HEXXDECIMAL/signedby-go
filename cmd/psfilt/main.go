@@ -154,10 +154,10 @@ func parseProcessLine(line string, opts *options) (processInfo, bool) {
 	ppid := ""
 	if len(fields) > 2 {
 		// Find the PID position first
-		for i, field := range fields {
-			if field == pid && i+1 < len(fields) {
+		for fieldIdx, field := range fields {
+			if field == pid && fieldIdx+1 < len(fields) {
 				// PPID is the field right after PID
-				ppid = fields[i+1]
+				ppid = fields[fieldIdx+1]
 				break
 			}
 		}
@@ -184,11 +184,11 @@ func parseProcessLine(line string, opts *options) (processInfo, bool) {
 }
 
 func extractPidAndCommand(fields []string) (pid string, command string) {
-	for i, field := range fields {
-		if i > 0 && i < 4 { // PID is usually in positions 1-3
+	for fieldIdx, field := range fields {
+		if fieldIdx > 0 && fieldIdx < 4 { // PID is usually in positions 1-3
 			if _, err := strconv.Atoi(field); err == nil {
 				pid = field
-				cmdStartIdx := calculateCommandStartIndex(i, fields)
+				cmdStartIdx := calculateCommandStartIndex(fieldIdx, fields)
 				if cmdStartIdx < len(fields) {
 					command = strings.Join(fields[cmdStartIdx:], " ")
 				}
@@ -210,7 +210,7 @@ func calculateCommandStartIndex(pidIndex int, fields []string) int {
 }
 
 func createProcessInfo(line string, fields []string, pid, command string, opts *options) processInfo {
-	cmdPath, needsRoot := getExecutableForPID(pid, opts.logger)
+	cmdPath, needsRoot := executableForPID(pid, opts.logger)
 
 	// Handle special cases
 	if needsRoot {
@@ -296,7 +296,7 @@ func displayProcessResults(output io.Writer, processes []processInfo, results ma
 	}
 }
 
-func getExecutableForPID(pid string, logger *slog.Logger) (string, bool) {
+func executableForPID(pid string, logger *slog.Logger) (string, bool) {
 	// On Linux, first try /proc/<pid>/exe which is most reliable
 	procExePath := "/proc/" + pid + "/exe"
 	if target, err := os.Readlink(procExePath); err == nil {
@@ -438,9 +438,9 @@ func cleanAppBundlePath(path string) string {
 func reconstructPathFromParts(path string) string {
 	parts := strings.Split(path, " ")
 	fullPath := ""
-	for i, part := range parts {
+	for partIdx, part := range parts {
 		// If we encounter another absolute path, stop
-		if i > 0 && strings.HasPrefix(part, "/") {
+		if partIdx > 0 && strings.HasPrefix(part, "/") {
 			break
 		}
 		// If we encounter a flag, stop
@@ -516,6 +516,7 @@ func verifyBinaries(paths []string, opts *options) map[string]*signedby.Signatur
 
 			opts.logger.Debug("verifying binary", "path", p)
 			info, err := verifier.VerifyWithOptions(p, signedby.VerifyOptions{
+				Context:        context.Background(),
 				UseCache:       !opts.noCache,
 				SkipValidation: true,
 				Timeout:        opts.timeout,
@@ -574,11 +575,13 @@ func displayProcess(output io.Writer, proc processInfo, info *signedby.Signature
 	case opts.pidColumn:
 		_, _ = fmt.Fprintf(output, "%s %s %s\n", proc.pid, proc.line, signer) //nolint:errcheck // writing to output
 	case opts.format != "":
-		formatted := opts.format
-		formatted = strings.ReplaceAll(formatted, "%pid", proc.pid)
-		formatted = strings.ReplaceAll(formatted, "%path", proc.path)
-		formatted = strings.ReplaceAll(formatted, "%signer", signer)
-		formatted = strings.ReplaceAll(formatted, "%line", proc.line)
+		replacer := strings.NewReplacer(
+			"%pid", proc.pid,
+			"%path", proc.path,
+			"%signer", signer,
+			"%line", proc.line,
+		)
+		formatted := replacer.Replace(opts.format)
 		_, _ = fmt.Fprintln(output, formatted) //nolint:errcheck // writing to output
 	default:
 		_, _ = fmt.Fprintf(output, "%s [%s]\n", proc.line, signer) //nolint:errcheck // writing to output

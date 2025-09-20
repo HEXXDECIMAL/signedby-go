@@ -17,7 +17,8 @@ func verifyWindows(ctx context.Context, path string, opts VerifyOptions) (*Signa
 	}
 
 	psScript := `
-		$sig = Get-AuthenticodeSignature -FilePath '%s'
+		param($FilePath)
+		$sig = Get-AuthenticodeSignature -FilePath $FilePath
 		@{
 			Status = $sig.Status
 			StatusMessage = $sig.StatusMessage
@@ -37,10 +38,7 @@ func verifyWindows(ctx context.Context, path string, opts VerifyOptions) (*Signa
 		} | ConvertTo-Json -Compress
 	`
 
-	psScript = strings.ReplaceAll(psScript, "'", "`")
-	psScript = strings.ReplaceAll(psScript, "%s", strings.ReplaceAll(path, `\`, `\\`))
-
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", psScript)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", psScript, "-FilePath", path)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -126,14 +124,14 @@ func extractOrgFromWindowsSubject(subject string) string {
 
 func checkInstalledPackage(ctx context.Context, path string, info *SignatureInfo) {
 	psScript := `
-		$file = '%s'
+		param($FilePath)
 		$programs = @()
 		$programs += Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
 		$programs += Get-ItemProperty "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
 		$programs += Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
 
 		foreach ($prog in $programs) {
-			if ($prog.InstallLocation -and $file.StartsWith($prog.InstallLocation)) {
+			if ($prog.InstallLocation -and $FilePath.StartsWith($prog.InstallLocation)) {
 				@{
 					DisplayName = $prog.DisplayName
 					DisplayVersion = $prog.DisplayVersion
@@ -144,10 +142,7 @@ func checkInstalledPackage(ctx context.Context, path string, info *SignatureInfo
 		}
 	`
 
-	psScript = strings.ReplaceAll(psScript, "'", "`")
-	psScript = strings.ReplaceAll(psScript, "%s", strings.ReplaceAll(path, `\`, `\\`))
-
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", psScript)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", psScript, "-FilePath", path)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

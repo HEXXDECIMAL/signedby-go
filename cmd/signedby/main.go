@@ -2,9 +2,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -17,6 +19,7 @@ func main() {
 		noCache    = flag.Bool("no-cache", false, "Skip cache")
 		fast       = flag.Bool("fast", false, "Skip signature validation for faster results")
 		timeout    = flag.Duration("timeout", 30*time.Second, "Timeout for verification")
+		debug      = flag.Bool("debug", false, "Enable debug logging")
 	)
 
 	flag.Usage = func() {
@@ -35,17 +38,32 @@ func main() {
 
 	path := flag.Arg(0)
 
+	// Setup logger based on debug flag
+	// Default to warn level so users see important issues
+	var logger *slog.Logger
+	if *debug {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
+	} else {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelWarn, // Show warnings and errors by default
+		}))
+	}
+
 	var verifier signedby.Verifier
 	if *noCache {
-		verifier = signedby.New()
+		verifier = signedby.NewWithLogger(logger, false)
 	} else {
-		verifier = signedby.NewWithCache()
+		verifier = signedby.NewWithLogger(logger, true)
 	}
 
 	opts := signedby.VerifyOptions{
+		Context:        context.Background(),
 		UseCache:       !*noCache,
 		SkipValidation: *fast,
 		Timeout:        *timeout,
+		Logger:         logger,
 	}
 
 	info, err := verifier.VerifyWithOptions(path, opts)

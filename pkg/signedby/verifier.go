@@ -16,6 +16,7 @@ type verifier struct {
 
 func (v *verifier) Verify(path string) (*SignatureInfo, error) {
 	return v.VerifyWithOptions(path, VerifyOptions{
+		Context:  context.Background(),
 		UseCache: v.cache != nil,
 		Timeout:  30 * time.Second,
 	})
@@ -42,7 +43,10 @@ func (v *verifier) VerifyWithOptions(path string, opts VerifyOptions) (*Signatur
 		logger.Debug("cache miss", "path", path)
 	}
 
-	ctx := context.Background()
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)

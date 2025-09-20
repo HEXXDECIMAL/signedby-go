@@ -2,6 +2,7 @@
 package signedby
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"time"
@@ -30,6 +31,7 @@ type Verifier interface {
 
 // VerifyOptions contains options for verification.
 type VerifyOptions struct {
+	Context        context.Context //nolint:containedctx // Options struct is correct place for context
 	Logger         *slog.Logger
 	Timeout        time.Duration
 	UseCache       bool

@@ -56,27 +56,19 @@ func runCodesign(ctx context.Context, path string) (stderr string, stdout string
 func handleCodesignError(err error, output, stdout string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {
 	outputLower := strings.ToLower(output)
 
-	if isUnsignedBinary(outputLower) {
+	if strings.Contains(outputLower, "not signed") ||
+		strings.Contains(outputLower, "unsigned") ||
+		strings.Contains(outputLower, "ad-hoc") {
 		return handleUnsignedBinary(output, info, logger, path)
 	}
 
-	if isKnownVerificationIssue(outputLower) {
+	if strings.Contains(outputLower, "not a mach-o file") ||
+		strings.Contains(outputLower, "is not an app bundle") ||
+		strings.Contains(outputLower, "a sealed resource is missing") {
 		return handleVerificationIssue(output, info, logger, path)
 	}
 
 	return handleUnknownError(err, output, stdout, info, logger, path)
-}
-
-func isUnsignedBinary(outputLower string) bool {
-	return strings.Contains(outputLower, "not signed") ||
-		strings.Contains(outputLower, "unsigned") ||
-		strings.Contains(outputLower, "ad-hoc")
-}
-
-func isKnownVerificationIssue(outputLower string) bool {
-	return strings.Contains(outputLower, "not a mach-o file") ||
-		strings.Contains(outputLower, "is not an app bundle") ||
-		strings.Contains(outputLower, "a sealed resource is missing")
 }
 
 func handleUnsignedBinary(output string, info *SignatureInfo, logger *slog.Logger, path string) (*SignatureInfo, error) {

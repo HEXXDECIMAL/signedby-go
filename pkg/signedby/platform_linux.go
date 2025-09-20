@@ -7,11 +7,23 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+)
+
+// Package manager related constants
+const (
+	archLinuxDomain = "archlinux.org"
+	signatureKeyword = "Signature"
+	ownedByMarker = "is owned by"
+	validatedByMarker = "Validated By"
+	packagerField = "Packager"
+	vendorField = "Vendor"
 )
 
 func verifyLinux(ctx context.Context, path string, opts VerifyOptions) (*SignatureInfo, error) {
 	distro := detectLinuxDistro()
+	opts.Logger.Debug("detected Linux distro", "distro", distro)
 
 	switch distro {
 	case "rpm":
@@ -23,6 +35,7 @@ func verifyLinux(ctx context.Context, path string, opts VerifyOptions) (*Signatu
 	case "arch":
 		return verifyArch(ctx, path, opts)
 	default:
+		opts.Logger.Debug("unknown Linux distro, cannot verify", "distro", distro)
 		return &SignatureInfo{
 			Path:  path,
 			Extra: map[string]any{"distro": "unknown"},
@@ -179,7 +192,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		output := stdout.String()
 		for _, line := range strings.Split(output, "\n") {
 			// Parse Vendor field
-			if strings.HasPrefix(line, "Vendor") {
+			if strings.HasPrefix(line, vendorField) {
 				parts := strings.SplitN(line, ":", 2)
 				if len(parts) == 2 {
 					vendor := strings.TrimSpace(parts[1])
@@ -192,7 +205,7 @@ func verifyRPM(ctx context.Context, path string, opts VerifyOptions) (*Signature
 				}
 			}
 			// Parse Signature field for signature verification
-			if strings.HasPrefix(line, "Signature") {
+			if strings.HasPrefix(line, signatureKeyword) {
 				parts := strings.SplitN(line, ":", 2)
 				if len(parts) == 2 {
 					sig := strings.TrimSpace(parts[1])
@@ -252,17 +265,27 @@ func verifyDEB(ctx context.Context, path string, opts VerifyOptions) (*Signature
 		Extra:         make(map[string]any),
 	}
 
+	opts.Logger.Debug("verifying DEB package", "path", path)
+
 	cmd := exec.CommandContext(ctx, "dpkg", "-S", path)
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		opts.Logger.Debug("dpkg -S failed", "path", path, "error", err, "stderr", stderr.String())
+		if strings.Contains(stderr.String(), "not found") {
+			opts.Logger.Warn("binary not found in any package", "path", path)
+		}
 		info.IsPackaged = false
 		return info, nil
 	}
 
 	output := strings.TrimSpace(stdout.String())
+	opts.Logger.Debug("dpkg -S output", "path", path, "output", output)
+
 	if output == "" {
+		opts.Logger.Debug("dpkg -S returned empty output", "path", path)
 		info.IsPackaged = false
 		return info, nil
 	}
@@ -271,38 +294,51 @@ func verifyDEB(ctx context.Context, path string, opts VerifyOptions) (*Signature
 	if len(parts) > 0 {
 		info.PackageName = strings.TrimSpace(parts[0])
 		info.IsPackaged = true
+		opts.Logger.Debug("found package", "packageName", info.PackageName)
 	}
 
 	if info.PackageName != "" {
 		cmd = exec.CommandContext(ctx, "dpkg", "-s", info.PackageName)
 		stdout.Reset()
+		stderr.Reset()
 		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 		if err := cmd.Run(); err == nil {
 			output := stdout.String()
+			opts.Logger.Debug("dpkg -s output received", "packageName", info.PackageName, "outputLength", len(output))
+
 			for _, line := range strings.Split(output, "\n") {
 				if strings.HasPrefix(line, "Version:") {
 					info.PackageVersion = strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
+					opts.Logger.Debug("found version", "version", info.PackageVersion)
 				}
 				if strings.HasPrefix(line, "Maintainer:") {
 					maintainer := strings.TrimSpace(strings.TrimPrefix(line, "Maintainer:"))
+					opts.Logger.Debug("found maintainer", "maintainer", maintainer)
 					if strings.Contains(maintainer, "Ubuntu") {
 						info.SignerOrg = "Ubuntu"
 						info.IsPlatform = true
+						opts.Logger.Debug("detected Ubuntu package")
 					} else if strings.Contains(maintainer, "Debian") {
 						info.SignerOrg = "Debian"
 						info.IsPlatform = true
+						opts.Logger.Debug("detected Debian package")
 					} else {
 						info.Extra["maintainer"] = maintainer
 					}
 				}
 				if strings.HasPrefix(line, "Origin:") {
 					origin := strings.TrimSpace(strings.TrimPrefix(line, "Origin:"))
+					opts.Logger.Debug("found origin", "origin", origin)
 					info.SignerOrg = origin
 					if isOSVendor(origin) {
 						info.IsPlatform = true
+						opts.Logger.Debug("detected platform vendor", "vendor", origin)
 					}
 				}
 			}
+		} else {
+			opts.Logger.Debug("dpkg -s failed", "packageName", info.PackageName, "error", err, "stderr", stderr.String())
 		}
 	}
 
@@ -310,6 +346,9 @@ func verifyDEB(ctx context.Context, path string, opts VerifyOptions) (*Signature
 	if files, err := os.ReadDir(aptListsDir); err == nil && len(files) > 0 {
 		info.SignatureValid = boolPtr(true)
 		info.Extra["repoSigned"] = true
+		opts.Logger.Debug("APT lists found, marking as signed", "fileCount", len(files))
+	} else {
+		opts.Logger.Debug("APT lists check", "error", err, "fileCount", 0)
 	}
 
 	return info, nil
@@ -339,8 +378,8 @@ func verifyAPK(ctx context.Context, path string, opts VerifyOptions) (*Signature
 
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
-		if strings.Contains(line, "is owned by") {
-			parts := strings.Split(line, "is owned by")
+		if strings.Contains(line, ownedByMarker) {
+			parts := strings.Split(line, ownedByMarker)
 			if len(parts) > 1 {
 				pkgInfo := strings.TrimSpace(parts[1])
 				pkgParts := strings.Split(pkgInfo, "-")
@@ -419,22 +458,22 @@ func verifyArch(ctx context.Context, path string, opts VerifyOptions) (*Signatur
 		if err := cmd.Run(); err == nil {
 			output := stdout.String()
 			for _, line := range strings.Split(output, "\n") {
-				if strings.HasPrefix(line, "Packager") {
-					packager := strings.TrimSpace(strings.TrimPrefix(line, "Packager"))
+				if strings.HasPrefix(line, packagerField) {
+					packager := strings.TrimSpace(strings.TrimPrefix(line, packagerField))
 					packager = strings.TrimPrefix(packager, ":")
 					packager = strings.TrimSpace(packager)
-					if strings.Contains(packager, "archlinux.org") {
+					if strings.Contains(packager, archLinuxDomain) {
 						info.SignerOrg = "Arch Linux"
 						info.IsPlatform = true
 					} else {
 						info.Extra["packager"] = packager
 					}
 				}
-				if strings.HasPrefix(line, "Validated By") {
-					validated := strings.TrimSpace(strings.TrimPrefix(line, "Validated By"))
+				if strings.HasPrefix(line, validatedByMarker) {
+					validated := strings.TrimSpace(strings.TrimPrefix(line, validatedByMarker))
 					validated = strings.TrimPrefix(validated, ":")
 					validated = strings.TrimSpace(validated)
-					if strings.Contains(validated, "Signature") {
+					if strings.Contains(validated, signatureKeyword) {
 						info.SignatureValid = boolPtr(true)
 					} else {
 						info.SignatureValid = boolPtr(false)
@@ -448,17 +487,16 @@ func verifyArch(ctx context.Context, path string, opts VerifyOptions) (*Signatur
 	return info, nil
 }
 
+// Pre-computed lowercase OS vendor names for efficiency
+var osVendorsLower = []string{
+	"red hat", "redhat", "fedora", "centos", "rocky", "almalinux",
+	"ubuntu", "debian", "canonical",
+	"suse", "opensuse", "alpine", "arch linux",
+}
+
 func isOSVendor(vendor string) bool {
-	osVendors := []string{
-		"Red Hat", "RedHat", "Fedora", "CentOS", "Rocky", "AlmaLinux",
-		"Ubuntu", "Debian", "Canonical",
-		"SUSE", "openSUSE", "Alpine", "Arch Linux",
-	}
 	vendorLower := strings.ToLower(vendor)
-	for _, v := range osVendors {
-		if strings.Contains(vendorLower, strings.ToLower(v)) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(osVendorsLower, func(v string) bool {
+		return strings.Contains(vendorLower, v)
+	})
 }
