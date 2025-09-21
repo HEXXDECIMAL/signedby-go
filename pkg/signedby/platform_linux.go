@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -22,6 +23,18 @@ const (
 )
 
 func verifyLinux(ctx context.Context, path string, opts VerifyOptions) (*SignatureInfo, error) {
+	// Resolve symlinks for all package managers
+	// Package managers track real files, not symlinks
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		opts.Logger.Debug("could not resolve symlinks", "path", path, "error", err)
+		resolvedPath = path // Fall back to original path
+	} else if resolvedPath != path {
+		opts.Logger.Debug("resolved symlink", "original", path, "resolved", resolvedPath)
+		// Use resolved path for package lookup
+		path = resolvedPath
+	}
+
 	distro := detectLinuxDistro()
 	opts.Logger.Debug("detected Linux distro", "distro", distro)
 
